@@ -106,7 +106,3 @@ client = Client(host='your_server_ip', port=your_port)
 - Message history storage
 - File transfer resume capability
 - Custom avatars and rich text formatting
-
-## License
-
-[MIT License](LICENSE)
