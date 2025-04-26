@@ -1,63 +1,207 @@
-import tkinter as tk
-from tkinter import simpledialog, messagebox
-import sys
 import socket
 import threading
+import os
+import time
 
-PORT = 5501
-FORMAT = 'utf-8'
-CLEAR_RIGHT = "\033[K"  # clean to the right of the cursor
-PREV_LINE = "\033[F"  # move cursor to the beginning of previous line
-
-stop_threads = threading.Event()
-chat_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-
-try:
-    alias = input("Enter an alias: ")
-    chat_socket.connect(('127.0.0.1', 5500))
-except KeyboardInterrupt:
-    print("\n[ERROR] KeyboardInterrupt raised")
-    exit()
-except Exception as e:
-    print(f"\n[ERROR] {e}")
-    exit()
-
-def chat_receive():
-    while not stop_threads.is_set():
+class Client:
+    def __init__(self, host='127.0.0.1', port=5555):
+        self.host = host
+        self.port = port
+        self.nickname = ""
+        self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.receiving_file = False
+        self.current_file = None
+        self.file_name = ""
+        self.file_size = 0
+        self.bytes_received = 0
+        self.sending_file = False
+        self.last_sent_file = ""
+    
+    def connect(self):
         try:
-            message = chat_socket.recv(1024).decode(FORMAT)
-            if message == "alias?":
-                chat_socket.send(alias.encode(FORMAT))
-            else:
-                print(message)
-        except:
-            print("[Disconnecting]")
-            chat_socket.close()
-            break #check later
-
-def chat_send():
-    while not stop_threads.is_set():
+            self.client.connect((self.host, self.port))
+            return True
+        except Exception as e:
+            print(f"Connection error: {e}")
+            return False
+    
+    def receive_messages(self):
+        while True:
+            try:
+                data = self.client.recv(4096)
+                if not data:
+                    print("Connection to server lost")
+                    if self.current_file:
+                        self.current_file.close()
+                    break
+                
+                # Check if this is a text control message or binary file data
+                try:
+                    # Try to decode as UTF-8, which would work for control messages
+                    message = data.decode('utf-8')
+                    
+                    # Process control message
+                    if message == "NICK":
+                        self.client.send(self.nickname.encode('utf-8'))
+                    
+                    elif message.startswith("FILE_INCOMING:"):
+                        # Format: FILE_INCOMING:filename:filesize:sender
+                        parts = message.split(':')
+                        self.file_name = parts[1]
+                        self.file_size = int(parts[2])
+                        sender = parts[3]
+                        
+                        # Check if this is a file we just sent
+                        if sender == self.nickname and self.file_name == self.last_sent_file:
+                            print(f"\nYour file '{self.file_name}' is being distributed to other clients")
+                            # Skip receiving our own file
+                            self.receiving_file = False
+                        else:
+                            print(f"\nReceiving file '{self.file_name}' from {sender} ({self.file_size} bytes)")
+                            
+                            # Create downloads directory if it doesn't exist
+                            if not os.path.exists("downloads"):
+                                os.makedirs("downloads")
+                            
+                            # Open file for writing
+                            self.current_file = open(f"downloads/{self.file_name}", 'wb')
+                            self.receiving_file = True
+                            self.bytes_received = 0
+                    
+                    elif message.startswith("FILE_TRANSFER_COMPLETE:"):
+                        parts = message.split(':')
+                        completed_file = parts[1]
+                        
+                        # Only process if we're receiving this file
+                        if self.receiving_file and completed_file == self.file_name and self.current_file:
+                            self.current_file.flush()
+                            self.current_file.close()
+                            print(f"\nFile received and saved to downloads/{self.file_name}")
+                            self.receiving_file = False
+                            self.current_file = None
+                        elif completed_file == self.last_sent_file:
+                            print(f"\nYour file '{completed_file}' was successfully sent to all clients")
+                            self.sending_file = False
+                            self.last_sent_file = ""
+                    
+                    else:
+                        # Regular text message
+                        print(message)
+                
+                except UnicodeDecodeError:
+                    # This is binary data, likely file content
+                    if self.receiving_file and self.current_file:
+                        self.current_file.write(data)
+                        self.bytes_received += len(data)
+                        
+                        # Print progress
+                        progress = (self.bytes_received / self.file_size) * 100
+                        print(f"\rReceiving: {progress:.1f}% complete", end="")
+                    else:
+                        # Unexpected binary data - ignore
+                        pass
+            
+            except Exception as e:
+                print(f"Error in receive_messages: {e}")
+                if self.current_file:
+                    self.current_file.close()
+                break
+    
+    def send_file(self, file_path):
         try:
-            message = f'{alias}: {input("")}'
-            print(f"{PREV_LINE}{message}{CLEAR_RIGHT}")
-            chat_socket.send(message.encode(FORMAT))
-        except BaseException as e:
-            print(f"[Disconnecting] {e}")
-            chat_socket.close()
-            break
+            if not os.path.exists(file_path):
+                print(f"File not found: {file_path}")
+                return False
+            
+            file_size = os.path.getsize(file_path)
+            file_name = os.path.basename(file_path)
+            
+            # Remember what file we're sending to avoid receiving our own file
+            self.sending_file = True
+            self.last_sent_file = file_name
+            
+            # Notify server about file transfer
+            self.client.send(f"FILE_TRANSFER:{file_name}:{file_size}".encode('utf-8'))
+            time.sleep(0.5)  # Small delay to ensure the message is processed
+            
+            # Send file data in chunks
+            with open(file_path, 'rb') as file:
+                bytes_sent = 0
+                chunk_size = 4096
+                
+                while bytes_sent < file_size:
+                    # Read chunk
+                    chunk = file.read(chunk_size)
+                    if not chunk:
+                        break
+                    
+                    # Send chunk
+                    self.client.send(chunk)
+                    bytes_sent += len(chunk)
+                    
+                    # Print progress
+                    progress = (bytes_sent / file_size) * 100
+                    print(f"\rSending: {progress:.1f}% complete", end="")
+                    
+                    # Small delay to avoid overwhelming the network/server
+                    time.sleep(0.001)
+            
+            print("\nFile uploaded to server, distributing to clients...")
+            return True
+        
+        except Exception as e:
+            print(f"Error sending file: {e}")
+            self.sending_file = False
+            self.last_sent_file = ""
+            return False
+    
+    def send_message(self, message):
+        try:
+            self.client.send(message.encode('utf-8'))
+            return True
+        except Exception as e:
+            print(f"Error sending message: {e}")
+            return False
+    
+    def start(self):
+        print("=== Chat Client ===")
+        self.nickname = input("Enter your nickname: ")
+        
+        if not self.connect():
+            print("Failed to connect to server.")
+            return
+        
+        receive_thread = threading.Thread(target=self.receive_messages)
+        receive_thread.daemon = True
+        receive_thread.start()
+        
+        print("Connected to the server! Type 'file:path/to/file' to send a file.")
+        
+        while True:
+            try:
+                message = input()
+                
+                if message.lower() == 'quit':
+                    break
+                
+                elif message.startswith('file:'):
+                    file_path = message[5:].strip()
+                    self.send_file(file_path)
+                
+                else:
+                    self.send_message(message)
+            
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"Error: {e}")
+                break
+        
+        print("Disconnecting from server...")
+        if self.current_file:
+            self.current_file.close()
+        self.client.close()
 
-recieve_thread = threading.Thread(target=chat_receive, daemon=True)
-recieve_thread.start()
-
-send_thread = threading.Thread(target=chat_send, daemon=True)
-send_thread.start()
-
-try:
-    recieve_thread.join()
-    send_thread.join()
-except:
-    print("Sending shutdown signal to threads")
-    stop_threads.set()
-    chat_socket.close()
-    exit()
+if __name__ == "__main__":
+    client = Client()
+    client.start()
