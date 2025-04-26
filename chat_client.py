@@ -4,7 +4,7 @@ import os
 import time
 
 class Client:
-    def __init__(self, host='127.0.0.1', port=5555):
+    def __init__(self, host='192.168.0.19', port=5555):
         self.host = host
         self.port = port
         self.nickname = ""
@@ -25,6 +25,23 @@ class Client:
             print(f"Connection error: {e}")
             return False
     
+    def handle_file_receive(self, sock, filename, filesize):
+        # Create downloads directory if it doesn't exist
+        os.makedirs('downloads', exist_ok=True)
+        
+        download_path = os.path.join('downloads', filename)
+        received_bytes = 0
+        
+        with open(download_path, 'wb') as f:
+            while received_bytes < filesize:
+                data = sock.recv(1024)
+                if not data:
+                    break
+                f.write(data)
+                received_bytes += len(data)
+        
+        print(f"File received and saved to {download_path}")
+
     def receive_messages(self):
         while True:
             try:
@@ -59,14 +76,13 @@ class Client:
                         else:
                             print(f"\nReceiving file '{self.file_name}' from {sender} ({self.file_size} bytes)")
                             
-                            # Create downloads directory if it doesn't exist
-                            if not os.path.exists("downloads"):
-                                os.makedirs("downloads")
+                            # Send acknowledgment
+                            self.client.send("READY".encode())
                             
-                            # Open file for writing
-                            self.current_file = open(f"downloads/{self.file_name}", 'wb')
-                            self.receiving_file = True
-                            self.bytes_received = 0
+                            # Handle the file receive
+                            self.handle_file_receive(self.client, self.file_name, self.file_size)
+                            self.receiving_file = False
+                            self.current_file = None
                     
                     elif message.startswith("FILE_TRANSFER_COMPLETE:"):
                         parts = message.split(':')
@@ -116,41 +132,34 @@ class Client:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
             
-            # Remember what file we're sending to avoid receiving our own file
             self.sending_file = True
             self.last_sent_file = file_name
             
-            # Notify server about file transfer
             self.client.send(f"FILE_TRANSFER:{file_name}:{file_size}".encode('utf-8'))
-            time.sleep(0.5)  # Small delay to ensure the message is processed
+            time.sleep(0.5)
             
-            # Send file data in chunks
             with open(file_path, 'rb') as file:
                 bytes_sent = 0
                 chunk_size = 4096
                 
                 while bytes_sent < file_size:
-                    # Read chunk
                     chunk = file.read(chunk_size)
                     if not chunk:
                         break
                     
-                    # Send chunk
                     self.client.send(chunk)
                     bytes_sent += len(chunk)
                     
-                    # Print progress
+                    # Update progress on same line
                     progress = (bytes_sent / file_size) * 100
-                    print(f"\rSending: {progress:.1f}% complete", end="")
-                    
-                    # Small delay to avoid overwhelming the network/server
-                    time.sleep(0.001)
+                    print(f"\rSending: {progress:.1f}% complete", end='', flush=True)
+                
+                # Print newline after transfer completes
+                print("\nFile uploaded to server, distributing to clients...")
+                return True
             
-            print("\nFile uploaded to server, distributing to clients...")
-            return True
-        
         except Exception as e:
-            print(f"Error sending file: {e}")
+            print(f"\nError sending file: {e}")
             self.sending_file = False
             self.last_sent_file = ""
             return False
